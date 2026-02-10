@@ -1,0 +1,44 @@
+name: Test OIDC Token Decoder Action
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  test-decode:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Decode OIDC Token
+      id: oidc
+      uses: ./
+
+    - name: Verify outputs
+      shell: bash
+      run: |
+        echo "Header output: ${{ steps.oidc.outputs.header }}"
+        echo "Payload output: ${{ steps.oidc.outputs.payload }}"
+
+        # Verify header is valid JSON
+        if ! echo '${{ steps.oidc.outputs.header }}' | jq -e '.' >/dev/null 2>&1; then
+          echo "❌ Header output is not valid JSON"
+          exit 1
+        fi
+
+        # Verify payload is valid JSON
+        if ! echo '${{ steps.oidc.outputs.payload }}' | jq -e '.' >/dev/null 2>&1; then
+          echo "❌ Payload output is not valid JSON"
+          exit 1
+        fi
+
+        echo "✅ Both outputs are valid JSON"

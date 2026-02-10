@@ -1,0 +1,137 @@
+name: 'OIDC Token Decoder'
+description: 'Fetches and decodes GitHub Actions OIDC tokens, displaying JWT header, payload claims, and key metadata'
+author: 'luketomlinson'
+
+outputs:
+  header:
+    description: 'Decoded JWT header as JSON'
+    value: ${{ steps.decode.outputs.header }}
+  payload:
+    description: 'Decoded JWT payload as JSON'
+    value: ${{ steps.decode.outputs.payload }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Decode OIDC Token
+      id: decode
+      shell: bash
+      run: |
+        set -euo pipefail
+
+        # --- guard: check that the runner can hand us an OIDC token ---
+        if [ -z "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" ] || [ -z "${ACTIONS_ID_TOKEN_REQUEST_TOKEN:-}" ]; then
+          echo "::error::OIDC credentials unavailable. Add 'permissions: id-token: write' to your workflow."
+          exit 1
+        fi
+
+        # hide the endpoint URL from logs
+        echo "::add-mask::${ACTIONS_ID_TOKEN_REQUEST_URL}"
+
+        # --- fetch the token from GitHub's OIDC provider ---
+        api_response=$(curl -sf \
+          -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
+          -H "Accept: application/json; api-version=2.0" \
+          "${ACTIONS_ID_TOKEN_REQUEST_URL}")
+
+        jwt_value=$(echo "${api_response}" | jq -r '.value // empty')
+
+        if [ -z "${jwt_value}" ]; then
+          echo "::error::Token endpoint returned no value."
+          exit 1
+        fi
+
+        echo "Token retrieved (${#jwt_value} chars)"
+
+        # --- split into the three dot-separated JWT segments ---
+        IFS='.' read -r seg_header seg_payload seg_sig <<< "${jwt_value}"
+
+        if [ -z "${seg_header}" ] || [ -z "${seg_payload}" ] || [ -z "${seg_sig}" ]; then
+          echo "::error::JWT does not contain three dot-separated segments."
+          exit 1
+        fi
+
+        # --- helper: base64url → plain text ---
+        b64url_decode() {
+          local data="$1"
+          local pad=$(( (4 - ${#data} % 4) % 4 ))
+          if [ "${pad}" -gt 0 ]; then
+            data="${data}$(printf '=%.0s' $(seq 1 "${pad}"))"
+          fi
+          echo "${data}" | tr -- '-_' '+/' | base64 -d 2>/dev/null
+        }
+
+        header_json=$(b64url_decode "${seg_header}" | jq '.' 2>/dev/null) || {
+          echo "::warning::Failed to decode JWT header segment."
+          header_json='{}'
+        }
+        payload_json=$(b64url_decode "${seg_payload}" | jq '.' 2>/dev/null) || {
+          echo "::warning::Failed to decode JWT payload segment."
+          payload_json='{}'
+        }
+
+        # --- log decoded sections ---
+        echo "---- Decoded Header ----"
+        echo "${header_json}"
+        echo "---- Decoded Payload ----"
+        echo "${payload_json}"
+
+        # --- expose outputs via GITHUB_OUTPUT (heredoc delimiter) ---
+        {
+          echo "header<<_OIDC_EOF_"
+          echo "${header_json}" | jq -c '.'
+          echo "_OIDC_EOF_"
+        } >> "${GITHUB_OUTPUT}"
+
+        {
+          echo "payload<<_OIDC_EOF_"
+          echo "${payload_json}" | jq -c '.'
+          echo "_OIDC_EOF_"
+        } >> "${GITHUB_OUTPUT}"
+
+        # --- write step summary ---
+        {
+          echo "## OIDC Token Decode Results"
+          echo ""
+          echo "### Header"
+          echo '```json'
+          echo "${header_json}"
+          echo '```'
+          echo ""
+          echo "### Payload"
+          echo '```json'
+          echo "${payload_json}"
+          echo '```'
+          echo ""
+        } >> "${GITHUB_STEP_SUMMARY}"
+
+        # --- highlight notable claims ---
+        echo "---- Claim Highlights ----"
+        for claim in iss sub aud repository repository_owner repository_owner_id \
+                     actor actor_id workflow job_workflow_ref ref ref_type sha \
+                     run_id run_number run_attempt; do
+          val=$(echo "${payload_json}" | jq -r --arg c "${claim}" '.[$c] // "(not set)"')
+          echo "${claim}: ${val}"
+        done
+
+        # readable timestamps
+        for ts_field in iat exp nbf; do
+          epoch=$(echo "${payload_json}" | jq -r --arg f "${ts_field}" '.[$f] // empty')
+          if [ -n "${epoch}" ]; then
+            human=$(date -u -r "${epoch}" '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null \
+              || date -u -d "@${epoch}" '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null \
+              || echo "?")
+            echo "${ts_field}: ${epoch} (${human})"
+          fi
+        done
+
+        # --- runner context ---
+        echo "---- Runner Context ----"
+        for var in GITHUB_REPOSITORY GITHUB_REF GITHUB_SHA GITHUB_ACTOR \
+                   GITHUB_WORKFLOW GITHUB_RUN_ID GITHUB_RUN_NUMBER GITHUB_JOB; do
+          echo "${var}: ${!var:-"(unset)"}"
+        done
+
+branding:
+  icon: 'key'
+  color: 'blue'
