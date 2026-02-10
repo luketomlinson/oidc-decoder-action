@@ -26,8 +26,6 @@ jobs:
   decode:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-
       - name: Decode OIDC Token
         id: oidc
         uses: luketomlinson/oidc-decoder-action@main

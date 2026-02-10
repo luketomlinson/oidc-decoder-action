@@ -19,164 +19,108 @@ runs:
       run: |
         set -euo pipefail
 
-        echo "🔑 Fetching OIDC token..."
-
+        # --- guard: check that the runner can hand us an OIDC token ---
         if [ -z "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" ] || [ -z "${ACTIONS_ID_TOKEN_REQUEST_TOKEN:-}" ]; then
-          echo "❌ OIDC token request URL or token not available."
-          echo "Ensure the workflow has 'permissions: id-token: write' and the job has an 'environment' configured if required."
+          echo "::error::OIDC credentials unavailable. Add 'permissions: id-token: write' to your workflow."
           exit 1
         fi
 
-        echo "::add-mask::$ACTIONS_ID_TOKEN_REQUEST_URL"
-        echo "OIDC_URL: $ACTIONS_ID_TOKEN_REQUEST_URL"
+        # hide the endpoint URL from logs
+        echo "::add-mask::${ACTIONS_ID_TOKEN_REQUEST_URL}"
 
-        # Get the OIDC token from GitHub's token endpoint
-        OIDC_TOKEN=$(curl -s \
-          -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+        # --- fetch the token from GitHub's OIDC provider ---
+        api_response=$(curl -sf \
+          -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
           -H "Accept: application/json; api-version=2.0" \
-          -H "Content-Type: application/json" \
-          "$ACTIONS_ID_TOKEN_REQUEST_URL" | jq -r '.value')
+          "${ACTIONS_ID_TOKEN_REQUEST_URL}")
 
-        if [ "$OIDC_TOKEN" = "null" ] || [ -z "$OIDC_TOKEN" ]; then
-          echo "❌ Failed to fetch OIDC token"
+        jwt_value=$(echo "${api_response}" | jq -r '.value // empty')
+
+        if [ -z "${jwt_value}" ]; then
+          echo "::error::Token endpoint returned no value."
           exit 1
         fi
 
-        echo "✅ Successfully fetched OIDC token"
-        echo "Token length: ${#OIDC_TOKEN} characters"
-        echo
+        echo "Token retrieved (${#jwt_value} chars)"
 
-        # Split the JWT into its three parts (header.payload.signature)
-        IFS='.' read -ra JWT_PARTS <<< "$OIDC_TOKEN"
+        # --- split into the three dot-separated JWT segments ---
+        IFS='.' read -r seg_header seg_payload seg_sig <<< "${jwt_value}"
 
-        if [ ${#JWT_PARTS[@]} -ne 3 ]; then
-          echo "❌ Invalid JWT format - expected 3 parts, got ${#JWT_PARTS[@]}"
+        if [ -z "${seg_header}" ] || [ -z "${seg_payload}" ] || [ -z "${seg_sig}" ]; then
+          echo "::error::JWT does not contain three dot-separated segments."
           exit 1
         fi
 
-        HEADER="${JWT_PARTS[0]}"
-        PAYLOAD="${JWT_PARTS[1]}"
-        SIGNATURE="${JWT_PARTS[2]}"
-
-        echo "🔍 JWT Structure:"
-        echo "Header: ${HEADER:0:20}..."
-        echo "Payload: ${PAYLOAD:0:20}..."
-        echo "Signature: ${SIGNATURE:0:20}..."
-        echo
-
-        # Function to decode base64url (JWT uses base64url encoding)
-        decode_base64url() {
-          local input="$1"
-          # Add padding if needed
-          case $((${#input} % 4)) in
-            2) input="${input}==" ;;
-            3) input="${input}=" ;;
-          esac
-          # Replace base64url chars with standard base64 chars
-          input=$(echo "$input" | tr '_-' '/+')
-          echo "$input" | base64 -d 2>/dev/null || { echo "::warning::Failed to base64url-decode JWT segment"; echo "{}"; }
+        # --- helper: base64url → plain text ---
+        b64url_decode() {
+          local data="$1"
+          local pad=$(( (4 - ${#data} % 4) % 4 ))
+          data="${data}$(printf '=%.0s' $(seq 1 ${pad}) 2>/dev/null)"
+          echo "${data}" | tr -- '-_' '+/' | base64 -d 2>/dev/null
         }
 
-        echo "📋 JWT Header:"
-        echo "=============="
-        DECODED_HEADER=$(decode_base64url "$HEADER")
-        echo "$DECODED_HEADER" | jq '.' 2>/dev/null || echo "Failed to decode header"
-        echo
+        header_json=$(b64url_decode "${seg_header}" | jq '.' 2>/dev/null) || header_json='{}'
+        payload_json=$(b64url_decode "${seg_payload}" | jq '.' 2>/dev/null) || payload_json='{}'
 
-        echo "📋 JWT Payload (Claims):"
-        echo "======================="
-        DECODED_PAYLOAD=$(decode_base64url "$PAYLOAD")
-        echo "$DECODED_PAYLOAD" | jq '.' 2>/dev/null || echo "Failed to decode payload"
-        echo
+        # --- log decoded sections ---
+        echo "---- Decoded Header ----"
+        echo "${header_json}"
+        echo "---- Decoded Payload ----"
+        echo "${payload_json}"
 
-        # Set outputs
+        # --- expose outputs via GITHUB_OUTPUT (heredoc delimiter) ---
         {
-          echo "header<<GHEOF"
-          echo "$DECODED_HEADER" | jq -c '.' 2>/dev/null || echo "{}"
-          echo "GHEOF"
-        } >> "$GITHUB_OUTPUT"
+          echo "header<<_OIDC_EOF_"
+          echo "${header_json}" | jq -c '.'
+          echo "_OIDC_EOF_"
+        } >> "${GITHUB_OUTPUT}"
 
         {
-          echo "payload<<GHEOF"
-          echo "$DECODED_PAYLOAD" | jq -c '.' 2>/dev/null || echo "{}"
-          echo "GHEOF"
-        } >> "$GITHUB_OUTPUT"
+          echo "payload<<_OIDC_EOF_"
+          echo "${payload_json}" | jq -c '.'
+          echo "_OIDC_EOF_"
+        } >> "${GITHUB_OUTPUT}"
 
-        # Write OIDC token contents to step summary
-        echo "## 🔑 OIDC Token Contents" >> "$GITHUB_STEP_SUMMARY"
-        echo "" >> "$GITHUB_STEP_SUMMARY"
-        echo "### JWT Header" >> "$GITHUB_STEP_SUMMARY"
-        echo '```json' >> "$GITHUB_STEP_SUMMARY"
-        if ! echo "$DECODED_HEADER" | jq '.' >> "$GITHUB_STEP_SUMMARY" 2>/dev/null; then
-          echo '```' >> "$GITHUB_STEP_SUMMARY"
-          echo "Failed to decode header" >> "$GITHUB_STEP_SUMMARY"
-        else
-          echo '```' >> "$GITHUB_STEP_SUMMARY"
-        fi
-        echo "" >> "$GITHUB_STEP_SUMMARY"
-        echo "### JWT Payload (Claims)" >> "$GITHUB_STEP_SUMMARY"
-        echo '```json' >> "$GITHUB_STEP_SUMMARY"
-        if ! echo "$DECODED_PAYLOAD" | jq '.' >> "$GITHUB_STEP_SUMMARY" 2>/dev/null; then
-          echo '```' >> "$GITHUB_STEP_SUMMARY"
-          echo "Failed to decode payload" >> "$GITHUB_STEP_SUMMARY"
-        else
-          echo '```' >> "$GITHUB_STEP_SUMMARY"
-        fi
-        echo "" >> "$GITHUB_STEP_SUMMARY"
+        # --- write step summary ---
+        {
+          echo "## OIDC Token Decode Results"
+          echo ""
+          echo "### Header"
+          echo '```json'
+          echo "${header_json}"
+          echo '```'
+          echo ""
+          echo "### Payload"
+          echo '```json'
+          echo "${payload_json}"
+          echo '```'
+          echo ""
+        } >> "${GITHUB_STEP_SUMMARY}"
 
-        echo "🔍 Key Claims Analysis:"
-        echo "======================"
+        # --- highlight notable claims ---
+        echo "---- Claim Highlights ----"
+        for claim in iss sub aud repository repository_owner repository_owner_id \
+                     actor actor_id workflow job_workflow_ref ref ref_type sha \
+                     run_id run_number run_attempt; do
+          val=$(echo "${payload_json}" | jq -r --arg c "${claim}" '.[$c] // "(not set)"')
+          echo "${claim}: ${val}"
+        done
 
-        # Extract and display key claims
-        if echo "$DECODED_PAYLOAD" | jq -e '.' >/dev/null 2>&1; then
-          echo "Issuer (iss): $(echo "$DECODED_PAYLOAD" | jq -r '.iss // "N/A"')"
-          echo "Subject (sub): $(echo "$DECODED_PAYLOAD" | jq -r '.sub // "N/A"')"
-          echo "Audience (aud): $(echo "$DECODED_PAYLOAD" | jq -r '.aud // "N/A"')"
-          echo "Repository: $(echo "$DECODED_PAYLOAD" | jq -r '.repository // "N/A"')"
-          echo "Repository Owner: $(echo "$DECODED_PAYLOAD" | jq -r '.repository_owner // "N/A"')"
-          echo "Repository Owner ID: $(echo "$DECODED_PAYLOAD" | jq -r '.repository_owner_id // "N/A"')"
-          echo "Actor: $(echo "$DECODED_PAYLOAD" | jq -r '.actor // "N/A"')"
-          echo "Actor ID: $(echo "$DECODED_PAYLOAD" | jq -r '.actor_id // "N/A"')"
-          echo "Workflow: $(echo "$DECODED_PAYLOAD" | jq -r '.workflow // "N/A"')"
-          echo "Job Workflow Ref: $(echo "$DECODED_PAYLOAD" | jq -r '.job_workflow_ref // "N/A"')"
-          echo "Ref: $(echo "$DECODED_PAYLOAD" | jq -r '.ref // "N/A"')"
-          echo "Ref Type: $(echo "$DECODED_PAYLOAD" | jq -r '.ref_type // "N/A"')"
-          echo "SHA: $(echo "$DECODED_PAYLOAD" | jq -r '.sha // "N/A"')"
-          echo "Run ID: $(echo "$DECODED_PAYLOAD" | jq -r '.run_id // "N/A"')"
-          echo "Run Number: $(echo "$DECODED_PAYLOAD" | jq -r '.run_number // "N/A"')"
-          echo "Run Attempt: $(echo "$DECODED_PAYLOAD" | jq -r '.run_attempt // "N/A"')"
-
-          # Decode timestamps
-          IAT=$(echo "$DECODED_PAYLOAD" | jq -r '.iat // empty')
-          EXP=$(echo "$DECODED_PAYLOAD" | jq -r '.exp // empty')
-          NBF=$(echo "$DECODED_PAYLOAD" | jq -r '.nbf // empty')
-
-          if [ -n "$IAT" ] && [ "$IAT" != "null" ]; then
-            echo "Issued At (iat): $IAT ($(date -d "@$IAT" 2>/dev/null || echo "Invalid timestamp"))"
+        # readable timestamps
+        for ts_field in iat exp nbf; do
+          epoch=$(echo "${payload_json}" | jq -r --arg f "${ts_field}" '.[$f] // empty')
+          if [ -n "${epoch}" ]; then
+            human=$(date -u -d "@${epoch}" '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || echo "?")
+            echo "${ts_field}: ${epoch} (${human})"
           fi
+        done
 
-          if [ -n "$EXP" ] && [ "$EXP" != "null" ]; then
-            echo "Expires At (exp): $EXP ($(date -d "@$EXP" 2>/dev/null || echo "Invalid timestamp"))"
-          fi
-
-          if [ -n "$NBF" ] && [ "$NBF" != "null" ]; then
-            echo "Not Before (nbf): $NBF ($(date -d "@$NBF" 2>/dev/null || echo "Invalid timestamp"))"
-          fi
-        else
-          echo "❌ Failed to parse payload as JSON"
-        fi
-
-        echo
-        echo "🎯 Environment Context:"
-        echo "======================"
-        echo "GitHub Repository: $GITHUB_REPOSITORY"
-        echo "GitHub Ref: $GITHUB_REF"
-        echo "GitHub SHA: $GITHUB_SHA"
-        echo "GitHub Actor: $GITHUB_ACTOR"
-        echo "GitHub Workflow: $GITHUB_WORKFLOW"
-        echo "GitHub Run ID: $GITHUB_RUN_ID"
-        echo "GitHub Run Number: $GITHUB_RUN_NUMBER"
-        echo "GitHub Job: ${GITHUB_JOB:-N/A}"
+        # --- runner context ---
+        echo "---- Runner Context ----"
+        for var in GITHUB_REPOSITORY GITHUB_REF GITHUB_SHA GITHUB_ACTOR \
+                   GITHUB_WORKFLOW GITHUB_RUN_ID GITHUB_RUN_NUMBER GITHUB_JOB; do
+          echo "${var}: ${!var:-"(unset)"}"
+        done
 
 branding:
   icon: 'key'
