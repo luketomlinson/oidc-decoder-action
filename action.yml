@@ -55,12 +55,20 @@ runs:
         b64url_decode() {
           local data="$1"
           local pad=$(( (4 - ${#data} % 4) % 4 ))
-          data="${data}$(printf '=%.0s' $(seq 1 ${pad}) 2>/dev/null)"
+          if [ "${pad}" -gt 0 ]; then
+            data="${data}$(printf '=%.0s' $(seq 1 "${pad}"))"
+          fi
           echo "${data}" | tr -- '-_' '+/' | base64 -d 2>/dev/null
         }
 
-        header_json=$(b64url_decode "${seg_header}" | jq '.' 2>/dev/null) || header_json='{}'
-        payload_json=$(b64url_decode "${seg_payload}" | jq '.' 2>/dev/null) || payload_json='{}'
+        header_json=$(b64url_decode "${seg_header}" | jq '.' 2>/dev/null) || {
+          echo "::warning::Failed to decode JWT header segment."
+          header_json='{}'
+        }
+        payload_json=$(b64url_decode "${seg_payload}" | jq '.' 2>/dev/null) || {
+          echo "::warning::Failed to decode JWT payload segment."
+          payload_json='{}'
+        }
 
         # --- log decoded sections ---
         echo "---- Decoded Header ----"
@@ -110,7 +118,9 @@ runs:
         for ts_field in iat exp nbf; do
           epoch=$(echo "${payload_json}" | jq -r --arg f "${ts_field}" '.[$f] // empty')
           if [ -n "${epoch}" ]; then
-            human=$(date -u -d "@${epoch}" '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || echo "?")
+            human=$(date -u -r "${epoch}" '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null \
+              || date -u -d "@${epoch}" '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null \
+              || echo "?")
             echo "${ts_field}: ${epoch} (${human})"
           fi
         done
