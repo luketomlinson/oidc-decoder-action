@@ -91,39 +91,19 @@ runs:
 
         # --- write step summary ---
         {
-          echo "## OIDC Token Decode Results"
+          echo "## 🔑 OIDC Token Decode Results"
           echo ""
-          echo "### Header"
+          echo "### 📋 Header"
           echo '```json'
           echo "${header_json}"
           echo '```'
           echo ""
-          echo "### Payload"
+          echo "### 📦 Payload"
           echo '```json'
           echo "${payload_json}"
           echo '```'
           echo ""
         } >> "${GITHUB_STEP_SUMMARY}"
-
-        # --- highlight notable claims ---
-        echo "---- Claim Highlights ----"
-        for claim in iss sub aud repository repository_owner repository_owner_id \
-                     actor actor_id workflow job_workflow_ref ref ref_type sha \
-                     run_id run_number run_attempt; do
-          val=$(echo "${payload_json}" | jq -r --arg c "${claim}" '.[$c] // "(not set)"')
-          echo "${claim}: ${val}"
-        done
-
-        # readable timestamps
-        for ts_field in iat exp nbf; do
-          epoch=$(echo "${payload_json}" | jq -r --arg f "${ts_field}" '.[$f] // empty')
-          if [ -n "${epoch}" ]; then
-            human=$(date -u -r "${epoch}" '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null \
-              || date -u -d "@${epoch}" '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null \
-              || echo "?")
-            echo "${ts_field}: ${epoch} (${human})"
-          fi
-        done
 
         # --- runner context ---
         echo "---- Runner Context ----"
