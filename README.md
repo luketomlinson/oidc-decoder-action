@@ -8,7 +8,7 @@ A GitHub Action that fetches and decodes GitHub Actions OIDC (OpenID Connect) to
 - Decodes and displays the JWT header and payload
 - Writes decoded token contents to the GitHub Step Summary
 - Outputs decoded header and payload as JSON for use in subsequent steps
-- Displays key claims analysis including issuer, subject, audience, repository info, and timestamps
+- Displays runner context information for debugging
 
 ## Usage
 
